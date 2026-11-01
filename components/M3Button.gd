@@ -365,8 +365,7 @@ func _initialize_caches():
 	_cached_style_focus = StyleBoxFlat.new()
 	_cached_style_hover_pressed = StyleBoxFlat.new()
 	for sb in [_cached_style_normal, _cached_style_hover, _cached_style_pressed, _cached_style_disabled, _cached_style_focus, _cached_style_hover_pressed]:
-		sb.anti_aliasing = true
-		sb.anti_aliasing_size = 1.0
+		M3Theme.configure_smooth_corners(sb, 0.0)
 
 func _initialize_theme_overrides():
 	# Apply theme overrides once; subsequent _update_theme() calls only mutate the cached objects
@@ -718,6 +717,8 @@ func _configure_stylebox(style: StyleBoxFlat, bg: Color, radius: int, pad_h: int
 	if not style:
 		return
 
+	var quality_radius := float(_custom_corner_radii.max()) if not _custom_corner_radii.is_empty() else float(radius)
+	M3Theme.configure_smooth_corners(style, quality_radius)
 	_style_bg_targets[style] = bg
 	if style != _fading_style:
 		style.bg_color = bg

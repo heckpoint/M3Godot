@@ -204,7 +204,9 @@ func _draw():
 
 func _draw_box(rect: Rect2, is_checked: bool, is_disabled: bool):
 	var sb = _cached_box_sb
-	sb.set_corner_radius_all(M3Units.dpi(CORNER_RADIUS))
+	var radius := M3Units.dpi(CORNER_RADIUS)
+	M3Theme.configure_smooth_corners(sb, radius)
+	sb.set_corner_radius_all(radius)
 	
 	var alpha = 0.38 if is_disabled else 1.0
 	
@@ -269,6 +271,7 @@ func _draw_state_overlay(center: Vector2, is_checked: bool):
 	
 	var sb = _cached_overlay_sb
 	sb.bg_color = overlay_color
+	M3Theme.configure_smooth_corners(sb, radius)
 	sb.set_corner_radius_all(int(radius))
 	var rect = Rect2(center - Vector2(radius, radius), Vector2(radius * 2, radius * 2))
 	draw_style_box(sb, rect)

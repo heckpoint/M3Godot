@@ -398,7 +398,9 @@ func _draw_placeholder_media() -> void:
 		_placeholder_style = StyleBoxFlat.new()
 		_placeholder_style.anti_aliasing = true
 	_placeholder_style.bg_color = _get_placeholder_media_color()
-	_placeholder_style.set_corner_radius_all(int(round(card_rounding_ratio * min(panel_size.x, panel_size.y) / 2.0)))
+	var radius: float = card_rounding_ratio * minf(panel_size.x, panel_size.y) / 2.0
+	M3Theme.configure_smooth_corners(_placeholder_style, radius)
+	_placeholder_style.set_corner_radius_all(int(round(radius)))
 	RenderingServer.canvas_item_clear(_media_canvas_item)
 	_placeholder_style.draw(_media_canvas_item, Rect2(panel_offset, panel_size))
 
@@ -714,8 +716,7 @@ func _apply_clickable_state():
 
 func _initialize_styleboxes():
 	_cached_stylebox = StyleBoxFlat.new()
-	_cached_stylebox.anti_aliasing = true
-	_cached_stylebox.anti_aliasing_size = 1.0
+	M3Theme.configure_smooth_corners(_cached_stylebox, 0.0)
 	_cached_stylebox.set_border_width_all(0)
 
 	_rounded_media_material = ShaderMaterial.new()
@@ -849,6 +850,7 @@ func _draw():
 	var max_radius = min(size.x, size.y) / 2.0
 	var radius = int(round(card_rounding_ratio * max_radius))
 	_configure_stylebox_for_state()
+	M3Theme.configure_smooth_corners(_cached_stylebox, radius)
 	_cached_stylebox.set_corner_radius_all(radius)
 	if _uses_rs_background() and _visual_bg_canvas_item.is_valid():
 		_redraw_visual_background(rect)

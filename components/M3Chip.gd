@@ -458,6 +458,7 @@ func _configure_chip_stylebox(style: StyleBoxFlat, bg: Color, radius: int, left_
 	if not style:
 		return
 
+	M3Theme.configure_smooth_corners(style, radius)
 	_style_bg_targets[style] = bg
 	if style != _fading_style:
 		style.bg_color = bg

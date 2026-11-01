@@ -1284,6 +1284,7 @@ func _draw_smooth_circle(rect: Rect2, color: Color):
 	var radius = int(min(rect.size.x, rect.size.y) / 2.0)
 	var style = _cached_style_circle
 	style.bg_color = color
+	M3Theme.configure_smooth_corners(style, radius)
 	style.corner_radius_top_left = radius
 	style.corner_radius_top_right = radius
 	style.corner_radius_bottom_left = radius
@@ -1371,6 +1372,7 @@ func _draw_focus_ring():
 		# Vertical: horizontal pill
 		var ring_w = handle_h + M3Units.dp(8)
 		var ring_h = M3Units.dp(12)
+		M3Theme.configure_smooth_corners(style, ring_h / 2.0)
 		style.corner_radius_top_left = int(ring_h / 2.0)
 		style.corner_radius_top_right = int(ring_h / 2.0)
 		style.corner_radius_bottom_left = int(ring_h / 2.0)
@@ -1383,6 +1385,7 @@ func _draw_focus_ring():
 		# Horizontal: vertical pill
 		var ring_w = M3Units.dp(12)
 		var ring_h = handle_h + M3Units.dp(8)
+		M3Theme.configure_smooth_corners(style, ring_w / 2.0)
 		style.corner_radius_top_left = int(ring_w / 2.0)
 		style.corner_radius_top_right = int(ring_w / 2.0)
 		style.corner_radius_bottom_left = int(ring_w / 2.0)
@@ -1401,6 +1404,7 @@ func _draw_rounded_rect_asymmetric(rect: Rect2, color: Color,
 	"""Draw a rounded rectangle with per-corner radius control using cached StyleBox."""
 	var style = _cached_style_rect
 	style.bg_color = color
+	M3Theme.configure_smooth_corners(style, maxf(maxf(tl, tr), maxf(bl, br)))
 	style.corner_radius_top_left = int(tl)
 	style.corner_radius_top_right = int(tr)
 	style.corner_radius_bottom_left = int(bl)

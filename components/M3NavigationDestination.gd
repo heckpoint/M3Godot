@@ -442,9 +442,8 @@ func _draw_rounded_rect(rect: Rect2, color: Color, radius: float):
 		_draw_sb.content_margin_top = 0
 		_draw_sb.content_margin_right = 0
 		_draw_sb.content_margin_bottom = 0
-		_draw_sb.anti_aliasing = true
-		_draw_sb.anti_aliasing_size = 1.0
 	
+	M3Theme.configure_smooth_corners(_draw_sb, radius)
 	_draw_sb.bg_color = color
 	_draw_sb.set_corner_radius_all(int(radius))
 	draw_style_box(_draw_sb, rect)

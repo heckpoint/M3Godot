@@ -162,6 +162,7 @@ func _update_theme():
 func _configure_stylebox(style: StyleBoxFlat, bg: Color, radius: int, pad_h: int, icon_gap: int = -1, has_icon: bool = false, border_w: int = 0, border_c: Color = Color.TRANSPARENT, shadow_size: int = 0, shadow_off: Vector2 = Vector2.ZERO, shadow_col: Color = Color.TRANSPARENT):
 	if not style:
 		return
+	M3Theme.configure_smooth_corners(style, radius)
 	style.bg_color = bg
 	style.set_corner_radius_all(radius)
 	style.set_content_margin_all(0)

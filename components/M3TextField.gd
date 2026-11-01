@@ -475,6 +475,7 @@ func _draw_filled(rect: Rect2, border_color: Color, border_width: float):
 func _draw_outlined(rect: Rect2, border_color: Color, border_width: float):
 	_cached_border_sb.border_color = border_color
 	_cached_border_sb.set_border_width_all(border_width)
+	M3Theme.configure_smooth_corners(_cached_border_sb, M3Units.dp(RADIUS))
 	_cached_border_sb.set_corner_radius_all(M3Units.dpi(RADIUS))
 	_cached_border_sb.draw(get_canvas_item(), rect)
 	
@@ -495,6 +496,7 @@ func _draw_focus_ring(rect: Rect2):
 	var ring_color = _get_accent()
 	var ring_width = M3Units.dp(1)
 	
+	M3Theme.configure_smooth_corners(_cached_focus_ring_sb, M3Units.dp(RADIUS))
 	_cached_focus_ring_sb.border_color = ring_color
 	_cached_focus_ring_sb.set_border_width_all(ring_width)
 	
@@ -526,6 +528,7 @@ func _update_bg_panel():
 		
 		var sb = _cached_bg_sb
 		sb.bg_color = bg_color
+		M3Theme.configure_smooth_corners(sb, M3Units.dp(RADIUS))
 		sb.corner_radius_top_left = M3Units.dpi(RADIUS)
 		sb.corner_radius_top_right = M3Units.dpi(RADIUS)
 		sb.corner_radius_bottom_left = 0

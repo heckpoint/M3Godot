@@ -337,14 +337,24 @@ static func disabled_color(color: Color) -> Color:
 # STYLEBOX FACTORIES
 # ============================================
 
+## Keep vector edges crisp while giving curved silhouettes enough vertices to
+## avoid visible faceting. Godot's default detail of 8 is sufficient for small
+## controls, but larger pills and focus rings need more segments. The cap keeps
+## the cost bounded for the many cached styleboxes used by M3 controls.
+static func configure_smooth_corners(stylebox: StyleBoxFlat, radius: float) -> void:
+	if not stylebox:
+		return
+	stylebox.anti_aliasing = true
+	stylebox.anti_aliasing_size = 1.0
+	stylebox.corner_detail = clampi(int(ceil(maxf(radius, 0.0) / 2.0)), 8, 32)
+
 static func make_flat(bg: Color, radius: int = RADIUS_NONE,
 					  border_w: int = 0, border_c: Color = Color.TRANSPARENT,
 					  pad_h: int = -1, pad_v: int = -1) -> StyleBoxFlat:
 	var s = StyleBoxFlat.new()
 	s.bg_color = bg
 	s.set_corner_radius_all(radius)
-	s.anti_aliasing = true
-	s.anti_aliasing_size = 1.0
+	configure_smooth_corners(s, radius)
 	if border_w > 0:
 		s.border_color = border_c
 		s.set_border_width_all(border_w)

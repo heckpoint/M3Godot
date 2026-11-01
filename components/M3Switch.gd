@@ -283,6 +283,7 @@ func _draw_focus_ring(rect: Rect2):
 	_focus_sb.bg_color = Color.TRANSPARENT
 	_focus_sb.border_color = M3Theme.get_on_surface()
 	_focus_sb.set_border_width_all(3)
+	M3Theme.configure_smooth_corners(_focus_sb, radius)
 	_focus_sb.set_corner_radius_all(radius)
 	draw_style_box(_focus_sb, focus_rect)
 
@@ -310,6 +311,7 @@ func _draw_track(rect: Rect2, is_on: bool, is_disabled: bool):
 		_track_sb.border_color = M3Theme.get_outline()
 		_track_sb.set_border_width_all(1)
 	
+	M3Theme.configure_smooth_corners(_track_sb, radius)
 	_track_sb.set_corner_radius_all(radius)
 	draw_style_box(_track_sb, rect)
 
@@ -349,6 +351,7 @@ func _draw_thumb(rect: Rect2, thumb_size_px: float, is_on: bool, is_disabled: bo
 		base_color = M3Theme.state_overlay(base_color, overlay_color, M3Theme.OPACITY_HOVER)
 	
 	_thumb_sb.bg_color = base_color
+	M3Theme.configure_smooth_corners(_thumb_sb, thumb_radius)
 	_thumb_sb.set_corner_radius_all(int(thumb_radius))
 	draw_style_box(_thumb_sb, thumb_rect)
 	
