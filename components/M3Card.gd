@@ -126,7 +126,7 @@ func end_bulk_layout() -> void:
 		if _bulk_layout_needs_actions:
 			_rebuild_actions()
 		if _bulk_layout_needs_media:
-			_update_media()
+			_update_media_panel_size(true)
 		if _bulk_layout_needs_text:
 			_update_text()
 
@@ -189,20 +189,32 @@ var show_background: bool = true:
 		if show_background == value:
 			return
 		show_background = value
-		if _ready_called:
-			queue_redraw()
-			_update_focus_ring_bounds()
-			_update_media_panel_size(true)
-			_update_visual_items_visibility()
+		if not _ready_called:
+			return
+		if _bulk_layout_active:
+			_bulk_layout_needs_media = true
+			_bulk_layout_needs_appearance = true
+			return
+		queue_redraw()
+		_update_focus_ring_bounds()
+		_update_media_panel_size(true)
+		_update_visual_items_visibility()
+		if has_focus():
+			FocusSubManager.notify_geometry_changed(self)
 
 var show_text_margin: bool = true:
 	set(value):
 		if show_text_margin == value:
 			return
 		show_text_margin = value
-		if _ready_called:
-			_update_media_panel_size(true)
-			queue_redraw()
+		if not _ready_called:
+			return
+		if _bulk_layout_active:
+			_bulk_layout_needs_media = true
+			_bulk_layout_needs_appearance = true
+			return
+		_update_media_panel_size(true)
+		queue_redraw()
 
 ## When true, text is drawn centered (horizontally and vertically) over the
 ## whole card instead of in the reserved text margin. Used by GameCard to show
@@ -212,10 +224,16 @@ var text_centered_overlay: bool = false:
 		if text_centered_overlay == value:
 			return
 		text_centered_overlay = value
-		if _ready_called:
-			_update_media_panel_size(true)
-			_update_text()
-			queue_redraw()
+		if not _ready_called:
+			return
+		if _bulk_layout_active:
+			_bulk_layout_needs_media = true
+			_bulk_layout_needs_text = true
+			_bulk_layout_needs_appearance = true
+			return
+		_update_media_panel_size(true)
+		_update_text()
+		queue_redraw()
 
 var card_rounding_ratio: float = 0.12:
 	set(value):
@@ -224,8 +242,12 @@ var card_rounding_ratio: float = 0.12:
 			return
 		card_rounding_ratio = clamped
 		if _ready_called:
+			_update_media_panel_size(true)
+			_update_media()
 			queue_redraw()
 			_update_focus_ring_bounds()
+			if has_focus():
+				FocusSubManager.notify_geometry_changed(self)
 
 var content_scale: Vector2 = Vector2.ONE:
 	set(value):
@@ -265,11 +287,9 @@ var _bulk_layout_needs_text: bool = false
 var _bulk_layout_needs_appearance: bool = false
 var _bulk_layout_needs_actions: bool = false
 
-var _focus_target_w: float = 0.0
-var _focus_target_h: float = 0.0
-
 var _media_bounds: Rect2 = Rect2()
 var _text_bounds: Rect2 = Rect2()
+var _content_size: Vector2 = Vector2.ZERO
 
 var _media_canvas_item: RID = RID()
 # Unclipped overlay carrier: no longer draws a focus ring itself (the ring is
@@ -284,9 +304,13 @@ var _visual_layer_rid: RID = RID()
 var _base_visual_draw_index: int = 0
 var _visual_bg_canvas_item: RID = RID()
 var _visuals_position_synced: bool = false
-# Last transform written to the visual RS items by sync_visual_transform().
-# Diagnostic: lets the owning grid verify rendered state against layout truth.
+# Last transforms written to the visual RS items by sync_visual_transform().
+# Also lets focus consume exactly the same transform as rendered media.
 var _last_visual_transform := Transform2D()
+var _last_media_transform := Transform2D()
+var _last_stamped_media_bounds := Rect2()
+var _last_stamped_card_size := Vector2(-1.0, -1.0)
+var _last_stamped_rounding: float = -1.0
 # Last layer-space offset provided by the owning grid's slot arithmetic. The
 # measured sync path prefers this over reading global_position so all stamp
 # writers share one truth. Cleared on tree re-entry until the grid re-stamps.
@@ -321,31 +345,27 @@ func _update_focus_ring_bounds() -> void:
 ## card otherwise, in canvas coordinates and including the focus-pop
 ## content_scale. Prefers the grid-stamped slot offset over measured globals
 ## (same truth as sync_visual_transform_with_offset).
+## Actual rendered media snapshot for launch/transition consumers. Unlike
+## Control.get_global_transform(), this includes the grid-stamped RS transform
+## and focus scale used by the visible media.
+func m3_get_media_render_geometry() -> Dictionary:
+	var xform := _last_media_transform if _has_grid_offset else _compute_visual_transform(global_position) * Transform2D().translated(_media_bounds.position)
+	return {
+		"rect": xform * Rect2(Vector2.ZERO, _media_bounds.size),
+		"transform": xform,
+		"local_bounds": _media_bounds,
+		"corner_radius_ratio": card_rounding_ratio,
+		"content_inset_pixels": _media_container.content_inset_pixels if _media_container else 0.0,
+		"wrap_inset_top_ratio": _media_container.wrap_inset_top_ratio if _media_container else 0.0,
+		"wrap_inset_left_ratio": _media_container.wrap_inset_left_ratio if _media_container else 0.0,
+	}
+
 func m3_get_focus_geometry() -> Dictionary:
-	var target_w := _focus_target_w
-	var target_h := _focus_target_h
-	if target_w <= 0.0:
-		target_w = size.x
-	if target_h <= 0.0:
-		target_h = size.y
-	var local_rect: Rect2
-	if not show_background:
-		var media_w := _media_bounds.size.x if _media_bounds.size.x > 0.0 else target_w
-		var media_h := _media_bounds.size.y if _media_bounds.size.y > 0.0 else target_h
-		local_rect = Rect2(_media_bounds.position, Vector2(media_w, media_h))
-	else:
-		local_rect = Rect2(Vector2.ZERO, size)
-	var radius := card_rounding_ratio * minf(target_w, target_h) * 0.5
-	var origin: Vector2
-	if _visual_layer and _visual_layer.is_inside_tree() and _has_grid_offset:
-		origin = _visual_layer.global_position + _last_grid_offset
-	else:
-		origin = global_position
-	var xform := Transform2D().translated(origin)
-	if not content_scale.is_equal_approx(Vector2.ONE):
-		var pivot := _get_content_scale_pivot()
-		xform = xform * Transform2D().translated(pivot) * Transform2D().scaled(content_scale) * Transform2D().translated(-pivot)
-		radius *= content_scale.x
+	var local_rect := _media_bounds if not show_background else Rect2(Vector2.ZERO, _get_content_size())
+	var radius_source := local_rect.size if local_rect.size.x > 0.0 and local_rect.size.y > 0.0 else _get_content_size()
+	var radius := card_rounding_ratio * minf(radius_source.x, radius_source.y) * 0.5
+	var xform := _last_visual_transform if _has_grid_offset else _compute_visual_transform(global_position)
+	radius *= content_scale.x
 	return { "rect": xform * local_rect, "radius": radius }
 
 ## When true, the card renders as a dimmed blank placeholder (background shape
@@ -443,19 +463,28 @@ func _reparent_visual_items() -> void:
 	if _focus_ring_canvas_item.is_valid():
 		RenderingServer.canvas_item_set_parent(_focus_ring_canvas_item, parent_rid)
 
-func sync_visual_transform() -> void:
+func sync_visual_transform(recompute_offset: bool = false) -> void:
 	"""Sync visual RS item positions to the card's transform and focus scale.
 
-	When the owning grid has provided a slot-arithmetic offset, prefer it over
-	measuring global_position: the grid stamps render-fresh values every frame
-	(pre-draw), while measured globals are stale before the transform flush —
-	two writers with different truths is what made cards jitter by a few px."""
+	Grid stamps remain authoritative during normal operation. A transform
+	notification is different: the ancestor transform has already committed,
+	so it is safe—and necessary—to remeasure instead of reusing a stale slot.
+	"""
 	if not _visual_layer or not _visual_layer.is_inside_tree() or not is_inside_tree():
 		return
-	if _has_grid_offset:
+	if recompute_offset:
+		sync_visual_transform_with_offset(global_position - _visual_layer.global_position)
+	elif _has_grid_offset:
 		sync_visual_transform_with_offset(_last_grid_offset)
 	else:
 		sync_visual_transform_with_offset(global_position - _visual_layer.global_position)
+
+func _compute_visual_transform(origin: Vector2) -> Transform2D:
+	var xform := Transform2D().translated(origin)
+	if not content_scale.is_equal_approx(Vector2.ONE):
+		var pivot := _get_content_scale_pivot()
+		xform = xform * Transform2D().translated(pivot) * Transform2D().scaled(content_scale) * Transform2D().translated(-pivot)
+	return xform
 
 func sync_visual_transform_with_offset(base_offset: Vector2) -> void:
 	"""Stamp visual RS items at a caller-provided layer-space offset instead of
@@ -465,21 +494,30 @@ func sync_visual_transform_with_offset(base_offset: Vector2) -> void:
 	if not _visual_layer or not _visual_layer.is_inside_tree() or not is_inside_tree():
 		return
 
+	var had_grid_offset := _has_grid_offset
 	_last_grid_offset = base_offset
 	_has_grid_offset = true
 
-	var base_transform := Transform2D().translated(base_offset)
-	if not content_scale.is_equal_approx(Vector2.ONE):
-		var pivot := _get_content_scale_pivot()
-		base_transform = base_transform * Transform2D().translated(pivot) * Transform2D().scaled(content_scale) * Transform2D().translated(-pivot)
+	var base_transform := _compute_visual_transform(base_offset)
+	var media_transform := base_transform * Transform2D().translated(_media_bounds.position)
+	if had_grid_offset \
+			and base_transform.is_equal_approx(_last_visual_transform) \
+			and media_transform.is_equal_approx(_last_media_transform) \
+			and _media_bounds.is_equal_approx(_last_stamped_media_bounds) \
+			and _get_content_size().is_equal_approx(_last_stamped_card_size) \
+			and is_equal_approx(card_rounding_ratio, _last_stamped_rounding):
+		return
 
 	_last_visual_transform = base_transform
+	_last_media_transform = media_transform
+	_last_stamped_media_bounds = _media_bounds
+	_last_stamped_card_size = _get_content_size()
+	_last_stamped_rounding = card_rounding_ratio
 
 	if _visual_bg_canvas_item.is_valid():
 		RenderingServer.canvas_item_set_transform(_visual_bg_canvas_item, base_transform)
 
 	if _media_canvas_item.is_valid():
-		var media_transform := base_transform * Transform2D().translated(_media_bounds.position)
 		RenderingServer.canvas_item_set_transform(_media_canvas_item, media_transform)
 
 	if _text_canvas_item.is_valid():
@@ -528,6 +566,11 @@ func _apply_visual_draw_index() -> void:
 	if _focus_ring_canvas_item.is_valid():
 		RenderingServer.canvas_item_set_draw_index(_focus_ring_canvas_item, idx + 3)
 
+## FocusSubManager draw-order protocol: place the global ring immediately
+## above this card's focused visual stack, regardless of its virtual index.
+func m3_get_focus_draw_index() -> int:
+	return _base_visual_draw_index + 1000004
+
 func _apply_content_scale() -> void:
 	sync_visual_transform()
 
@@ -537,7 +580,7 @@ func _apply_content_scale() -> void:
 ## content-alignment edge so the content block stays glued to it while
 ## unfocused cards shrink inward.
 func _get_content_scale_pivot() -> Vector2:
-	var pivot := size * 0.5
+	var pivot := _get_content_size() * 0.5
 	if not focus_scale_inverted:
 		return pivot
 	match content_alignment:
@@ -548,9 +591,9 @@ func _get_content_scale_pivot() -> Vector2:
 				pivot.x = 0.0
 		ContentAlignment.END:
 			if card_layout_mode == LayoutMode.VERTICAL:
-				pivot.y = size.y
+				pivot.y = _get_content_size().y
 			else:
-				pivot.x = size.x
+				pivot.x = _get_content_size().x
 	return pivot
 
 
@@ -603,7 +646,7 @@ func _free_rs_items() -> void:
 
 func _update_visual_items_visibility() -> void:
 	var base_visible := visible and is_inside_tree()
-	var has_text := not headline.is_empty() or (not supporting_text.is_empty() and size.y >= M3Units.dp(100.0))
+	var has_text := not headline.is_empty() or (not supporting_text.is_empty() and _get_content_size().y >= M3Units.dp(100.0))
 	var using_layer := _uses_visual_layer()
 	
 	# Background and text are only drawn through RS when a visual layer is active.
@@ -846,8 +889,8 @@ func _rebuild_layout():
 func _draw():
 	if not _cached_stylebox or not show_background:
 		return
-	var rect = Rect2(Vector2.ZERO, size)
-	var max_radius = min(size.x, size.y) / 2.0
+	var rect = Rect2(Vector2.ZERO, _get_content_size())
+	var max_radius = minf(rect.size.x, rect.size.y) / 2.0
 	var radius = int(round(card_rounding_ratio * max_radius))
 	_configure_stylebox_for_state()
 	M3Theme.configure_smooth_corners(_cached_stylebox, radius)
@@ -995,18 +1038,7 @@ func _draw_default_media():
 	RenderingServer.canvas_item_add_rect(_media_canvas_item, rect, Color.WHITE)
 
 func _compute_cover_uv(target_size: Vector2, tex_size: Vector2) -> Dictionary:
-	var scale := Vector2.ONE
-	var offset := Vector2.ZERO
-	if target_size.x <= 0.0 or target_size.y <= 0.0 or tex_size.x <= 0.0 or tex_size.y <= 0.0:
-		return { "scale": scale, "offset": offset }
-	var card_aspect := target_size.x / target_size.y
-	var tex_aspect := tex_size.x / tex_size.y
-	if card_aspect > tex_aspect:
-		scale.y = tex_aspect / card_aspect
-	else:
-		scale.x = card_aspect / tex_aspect
-	offset = (Vector2.ONE - scale) * 0.5
-	return { "scale": scale, "offset": offset }
+	return MediaContainer.compute_cover_uv(target_size, tex_size)
 
 static func _pick_headline_spec(height_dp: float) -> Dictionary:
 	for spec in _HEADLINE_SCALE:
@@ -1061,7 +1093,7 @@ func _update_text() -> void:
 		_cached_fonts = M3Theme.load_fonts()
 	var fonts = _cached_fonts
 	
-	var height_dp := size.y / M3Units.get_scale()
+	var height_dp := _get_content_size().y / M3Units.get_scale()
 	var headline_spec := _pick_headline_spec(height_dp)
 	var supporting_spec := _pick_supporting_spec(height_dp)
 	var font_color := M3Theme.get_on_surface()
@@ -1071,7 +1103,7 @@ func _update_text() -> void:
 		h_align = HORIZONTAL_ALIGNMENT_CENTER
 	var needs_shadow := not show_background
 	var has_headline := not headline.is_empty()
-	var has_supporting := not supporting_text.is_empty() and size.y >= M3Units.dp(100.0)
+	var has_supporting := not supporting_text.is_empty() and _get_content_size().y >= M3Units.dp(100.0)
 	var text_rect := _text_bounds
 	
 	var text_changed: bool = (
@@ -1192,7 +1224,7 @@ func _update_text_labels() -> void:
 		_cached_fonts = M3Theme.load_fonts()
 	var fonts = _cached_fonts
 	
-	var height_dp := size.y / M3Units.get_scale()
+	var height_dp := _get_content_size().y / M3Units.get_scale()
 	var headline_spec := _pick_headline_spec(height_dp)
 	var supporting_spec := _pick_supporting_spec(height_dp)
 	var font_color := M3Theme.get_on_surface()
@@ -1219,7 +1251,7 @@ func _update_text_labels() -> void:
 			_headline_label.remove_theme_constant_override("shadow_outline_size")
 	
 	_supporting_label.text = supporting_text
-	_supporting_label.visible = not supporting_text.is_empty() and size.y >= M3Units.dp(100.0)
+	_supporting_label.visible = not supporting_text.is_empty() and _get_content_size().y >= M3Units.dp(100.0)
 	if _supporting_label.visible:
 		_supporting_label.add_theme_font_override("font", fonts[supporting_spec.weight])
 		_supporting_label.add_theme_font_size_override("font_size", M3Units.dp(supporting_spec.size))
@@ -1336,7 +1368,7 @@ func _animate_state_layer() -> void:
 func _notification(what: int):
 	match what:
 		NOTIFICATION_RESIZED:
-			if not is_node_ready() or size.x <= 0 or size.y <= 0:
+			if not is_node_ready() or _get_content_size().x <= 0 or _get_content_size().y <= 0:
 				return
 			queue_redraw()
 			# force=false: RESIZED fires after the layout pass has already
@@ -1367,7 +1399,7 @@ func _notification(what: int):
 			# (after its FlowContainer sort), otherwise a card can flash/misplace
 			# at a stale offset mid-sort — the classic "column unglued" race.
 			if _visual_layer and _visual_layer.is_inside_tree() and is_inside_tree():
-				sync_visual_transform()
+				sync_visual_transform(true)
 			if has_focus():
 				FocusSubManager.notify_geometry_changed(self)
 
@@ -1389,6 +1421,18 @@ func _gui_input(event: InputEvent):
 					button_up.emit()
 					pressed.emit()
 
+func _get_content_size() -> Vector2:
+	if _content_size.x > 0.0 and _content_size.y > 0.0:
+		return _content_size
+	var result := custom_minimum_size
+	if result.x <= 0.0:
+		result.x = size.x
+	if result.y <= 0.0:
+		result.y = size.y
+	result.x = maxf(result.x, M3Units.dp(40.0))
+	result.y = maxf(result.y, M3Units.dp(40.0))
+	return result
+
 func _update_media_panel_size(force: bool = false) -> void:
 	var card_w := custom_minimum_size.x
 	var card_h := custom_minimum_size.y
@@ -1399,6 +1443,9 @@ func _update_media_panel_size(force: bool = false) -> void:
 
 	card_w = maxf(card_w, M3Units.dp(40.0))
 	card_h = maxf(card_h, M3Units.dp(40.0))
+	# Commit one immutable content-size snapshot before deriving dependent
+	# geometry. Control.size remains owned by Godot's container passes.
+	_content_size = Vector2(card_w, card_h)
 	
 	var media_w: float = 0.0
 	var media_h: float = 0.0
@@ -1543,9 +1590,6 @@ func _update_media_panel_size(force: bool = false) -> void:
 		if _media_content.has_method("set_parent_rid") and _media_canvas_item.is_valid():
 			_media_content.set_parent_rid(_media_canvas_item)
 	
-	_focus_target_w = media_w
-	_focus_target_h = media_h
-	
 	if _media_container:
 		_media_container.bounds = Rect2(Vector2.ZERO, _media_bounds.size)
 		_media_container.corner_radius_ratio = card_rounding_ratio
@@ -1582,7 +1626,7 @@ func _update_text_content_sizes() -> void:
 			if not is_equal_approx(_text_content.custom_minimum_size.x, min_text_w):
 				_text_content.custom_minimum_size.x = min_text_w
 	else:
-		var min_text_h = M3Units.dp(get_min_text_height_dp(size.y / M3Units.get_scale(), not headline.is_empty()))
+		var min_text_h = M3Units.dp(get_min_text_height_dp(_get_content_size().y / M3Units.get_scale(), not headline.is_empty()))
 		if not is_equal_approx(_text_content.custom_minimum_size.y, min_text_h):
 			_text_content.custom_minimum_size.y = min_text_h
 
