@@ -571,6 +571,12 @@ func _apply_visual_draw_index() -> void:
 func m3_get_focus_draw_index() -> int:
 	return _base_visual_draw_index + 1000004
 
+## Draw index for the optional interior compositor, matching the media surface
+## rather than inventing a separate stacking order.
+func m3_get_compositor_draw_index() -> int:
+	var boost := 1000000 if (has_focus() and _uses_visual_layer()) else 0
+	return _base_visual_draw_index + boost + 2
+
 func _apply_content_scale() -> void:
 	sync_visual_transform()
 
@@ -1326,7 +1332,6 @@ func refresh_theme():
 func refresh_scale() -> void:
 	if not _ready_called:
 		return
-	custom_minimum_size.y = 0
 	_update_appearance()
 	if _text_content:
 		_text_content.add_theme_constant_override("separation", M3Units.dp(LABEL_GAP))
@@ -1564,7 +1569,8 @@ func _update_media_panel_size(force: bool = false) -> void:
 	# local offset here. Visual-layer cards must NOT be written directly: the
 	# correct layer-space transform is set by sync_visual_transform() below.
 	if _media_canvas_item.is_valid() and not _uses_visual_layer():
-		RenderingServer.canvas_item_set_transform(_media_canvas_item, Transform2D().translated(_media_bounds.position))
+		_last_media_transform = Transform2D().translated(_media_bounds.position)
+		RenderingServer.canvas_item_set_transform(_media_canvas_item, _last_media_transform)
 
 	var pad = M3Units.dp(PADDING)
 	var half_pad = M3Units.dp(PADDING / 2.0)
