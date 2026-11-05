@@ -361,7 +361,7 @@ func m3_get_media_render_geometry() -> Dictionary:
 	}
 
 func m3_get_focus_geometry() -> Dictionary:
-	var local_rect := _media_bounds if not show_background else Rect2(Vector2.ZERO, _get_content_size())
+	var local_rect := _media_bounds if not show_background else Rect2(Vector2.ZERO, size)
 	var radius_source := local_rect.size if local_rect.size.x > 0.0 and local_rect.size.y > 0.0 else _get_content_size()
 	var radius := card_rounding_ratio * minf(radius_source.x, radius_source.y) * 0.5
 	var xform := _last_visual_transform if _has_grid_offset else _compute_visual_transform(global_position)
@@ -895,7 +895,7 @@ func _rebuild_layout():
 func _draw():
 	if not _cached_stylebox or not show_background:
 		return
-	var rect = Rect2(Vector2.ZERO, _get_content_size())
+	var rect = Rect2(Vector2.ZERO, size)
 	var max_radius = minf(rect.size.x, rect.size.y) / 2.0
 	var radius = int(round(card_rounding_ratio * max_radius))
 	_configure_stylebox_for_state()
