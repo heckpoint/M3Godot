@@ -94,6 +94,22 @@ var text_alignment: TextAlignment = TextAlignment.FOLLOW_CONTENT:
 		text_alignment = value
 		_on_text_render_options_changed()
 
+## Optional headline styling overrides. Defaults preserve the standard M3
+## on-surface color and medium font weight used by every other card.
+var headline_color_override: Color = Color.TRANSPARENT:
+	set(value):
+		if value == headline_color_override:
+			return
+		headline_color_override = value
+		_on_text_render_options_changed()
+
+var headline_font_weight: String = "medium":
+	set(value):
+		if value == headline_font_weight:
+			return
+		headline_font_weight = value
+		_on_text_render_options_changed()
+
 ## Render-only visibility gates. Keeping the source strings intact means focus
 ## changes cannot alter text measurement or media bounds.
 var text_content_visible: bool = true:
@@ -370,6 +386,7 @@ var _last_grid_offset := Vector2.ZERO
 var _has_grid_offset: bool = false
 
 var _applied_headline_size_dp: float = -1.0
+var _applied_headline_weight: String = "medium"
 var _applied_supporting_size_dp: float = -1.0
 var _applied_font_color: Color = Color(-1, -1, -1)
 var _applied_supporting_color: Color = Color(-1, -1, -1)
@@ -911,6 +928,7 @@ func _initialize_styleboxes():
 func _rebuild_layout():
 	_reset_text_scroll()
 	_applied_headline_size_dp = -1.0
+	_applied_headline_weight = ""
 	_applied_supporting_size_dp = -1.0
 	_applied_font_color = Color(-1, -1, -1)
 	_applied_supporting_color = Color(-1, -1, -1)
@@ -1344,13 +1362,14 @@ func _update_text() -> void:
 	var fonts = _cached_fonts
 
 	var height_dp := _get_content_size().y / M3Units.get_scale()
-	var headline_spec := _pick_headline_spec(height_dp)
+	var headline_spec := _pick_headline_spec(height_dp).duplicate()
+	headline_spec.weight = headline_font_weight
 	var supporting_spec := _pick_supporting_spec(height_dp)
-	var headline_font: Font = fonts[headline_spec.weight]
+	var headline_font: Font = fonts.get(headline_spec.weight, fonts["medium"])
 	var supporting_font: Font = fonts[supporting_spec.weight]
 	var headline_size := int(M3Units.dp(headline_spec.size))
 	var supporting_size := int(M3Units.dp(supporting_spec.size))
-	var font_color := M3Theme.get_on_surface()
+	var font_color := headline_color_override if headline_color_override.a > 0.0 else M3Theme.get_on_surface()
 	var supporting_color := M3Theme.get_on_surface_variant()
 	var h_align: int = _get_horizontal_alignment()
 	var needs_shadow := not show_background
@@ -1378,6 +1397,7 @@ func _update_text() -> void:
 		headline != _applied_headline_text
 		or supporting_text != _applied_supporting_text
 		or headline_spec.size != _applied_headline_size_dp
+		or headline_spec.weight != _applied_headline_weight
 		or supporting_spec.size != _applied_supporting_size_dp
 		or font_color != _applied_font_color
 		or supporting_color != _applied_supporting_color
@@ -1400,6 +1420,7 @@ func _update_text() -> void:
 	_applied_headline_text = headline
 	_applied_supporting_text = supporting_text
 	_applied_headline_size_dp = headline_spec.size
+	_applied_headline_weight = headline_spec.weight
 	_applied_supporting_size_dp = supporting_spec.size
 	_applied_font_color = font_color
 	_applied_supporting_color = supporting_color
@@ -1531,9 +1552,10 @@ func _update_text_labels() -> void:
 	var fonts = _cached_fonts
 	
 	var height_dp := _get_content_size().y / M3Units.get_scale()
-	var headline_spec := _pick_headline_spec(height_dp)
+	var headline_spec := _pick_headline_spec(height_dp).duplicate()
+	headline_spec.weight = headline_font_weight
 	var supporting_spec := _pick_supporting_spec(height_dp)
-	var font_color := M3Theme.get_on_surface()
+	var font_color := headline_color_override if headline_color_override.a > 0.0 else M3Theme.get_on_surface()
 	var supporting_color := M3Theme.get_on_surface_variant()
 	var h_align := _get_horizontal_alignment()
 	var needs_shadow := not show_background
@@ -1541,7 +1563,7 @@ func _update_text_labels() -> void:
 	_headline_label.text = headline
 	_headline_label.visible = text_content_visible and not headline.is_empty()
 	if _headline_label.visible:
-		_headline_label.add_theme_font_override("font", fonts[headline_spec.weight])
+		_headline_label.add_theme_font_override("font", fonts.get(headline_spec.weight, fonts["medium"]))
 		_headline_label.add_theme_font_size_override("font_size", M3Units.dp(headline_spec.size))
 		_headline_label.add_theme_color_override("font_color", font_color)
 		_headline_label.horizontal_alignment = h_align
