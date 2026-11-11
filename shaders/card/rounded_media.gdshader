@@ -28,5 +28,5 @@ void fragment() {
 	vec4 tex_color = texture(game_texture, tex_uv);
 
 	tex_color.a *= edge_alpha * alpha;
-	COLOR = tex_color;
+	COLOR = tex_color * COLOR;
 }

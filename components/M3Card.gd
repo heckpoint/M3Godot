@@ -7,6 +7,7 @@ const RoundedMediaShader = preload("res://addons/m3/shaders/card/rounded_media.g
 enum Variant { ELEVATED, FILLED, OUTLINED }
 enum LayoutMode { VERTICAL, HORIZONTAL }
 enum ContentAlignment { START, CENTER, END }
+enum TextAlignment { FOLLOW_CONTENT, LEFT, CENTER, RIGHT }
 
 const PADDING := 16.0
 const MEDIA_WIDTH_LIST := 256.0
@@ -23,6 +24,9 @@ const _SUPPORTING_SCALE := [
 ]
 const ACTIONS_GAP := 8.0
 const LABEL_GAP := 4.0
+const TEXT_SCROLL_SPEED_DP := 36.0
+const TEXT_SCROLL_GAP_DP := 48.0
+const TEXT_SCROLL_HOLD_SECONDS := 0.8
 const MIN_HEIGHT_VERTICAL_DP := 240.0
 const MIN_HEIGHT_HORIZONTAL_DP := 80.0
 
@@ -80,6 +84,52 @@ const MIN_HEIGHT_HORIZONTAL_DP := 80.0
 		# Alignment moves the scale pivot; re-stamp while a focus scale is active.
 		if not content_scale.is_equal_approx(Vector2.ONE):
 			sync_visual_transform()
+
+## Text-only alignment. FOLLOW_CONTENT preserves the legacy behavior of using
+## content_alignment; explicit values never move media or focus-scale pivots.
+var text_alignment: TextAlignment = TextAlignment.FOLLOW_CONTENT:
+	set(value):
+		if value == text_alignment:
+			return
+		text_alignment = value
+		_on_text_render_options_changed()
+
+## Render-only visibility gates. Keeping the source strings intact means focus
+## changes cannot alter text measurement or media bounds.
+var text_content_visible: bool = true:
+	set(value):
+		if value == text_content_visible:
+			return
+		text_content_visible = value
+		_on_text_render_options_changed()
+
+var supporting_text_visible: bool = true:
+	set(value):
+		if value == supporting_text_visible:
+			return
+		supporting_text_visible = value
+		_on_text_render_options_changed()
+
+var scroll_truncated_text: bool = false:
+	set(value):
+		if value == scroll_truncated_text:
+			return
+		scroll_truncated_text = value
+		_on_text_render_options_changed()
+
+## Explicit focus state supplied by GameCard (and the base focus handler).
+var text_focused: bool = false:
+	set(value):
+		if value == text_focused:
+			return
+		text_focused = value
+		_on_text_render_options_changed()
+
+func _on_text_render_options_changed() -> void:
+	if not _ready_called:
+		return
+	_reset_text_scroll()
+	_update_text()
 
 var media_aspect_ratio: float = -1.0:
 	set(value):
@@ -156,6 +206,7 @@ func end_bulk_layout() -> void:
 			return
 		headline = value
 		if _ready_called:
+			_reset_text_scroll()
 			_update_text()
 
 @export var supporting_text: String = "":
@@ -164,6 +215,7 @@ func end_bulk_layout() -> void:
 			return
 		supporting_text = value
 		if _ready_called:
+			_reset_text_scroll()
 			_update_text()
 
 @export var clickable: bool = true:
@@ -329,6 +381,21 @@ var _applied_text_bounds: Rect2 = Rect2()
 var _applied_show_background: bool = true
 var _applied_text_centered_overlay: bool = false
 var _applied_fonts: Dictionary = {}
+var _applied_text_content_visible: bool = true
+var _applied_supporting_text_visible: bool = true
+var _applied_scroll_truncated_text: bool = false
+var _applied_text_focused: bool = false
+var _applied_headline_scroll_offset: float = 0.0
+var _applied_supporting_scroll_offset: float = 0.0
+
+var _headline_scroll_tween: Tween = null
+var _supporting_scroll_tween: Tween = null
+var _headline_scroll_distance: float = 0.0
+var _supporting_scroll_distance: float = 0.0
+var _headline_scroll_cycle: float = 0.0
+var _supporting_scroll_cycle: float = 0.0
+var _headline_scroll_offset: float = 0.0
+var _supporting_scroll_offset: float = 0.0
 
 var _last_media_min_x: float = -1.0
 var _last_media_min_y: float = -1.0
@@ -377,21 +444,71 @@ const PLACEHOLDER_MODULATE := Color(1, 1, 1, 0.2)
 ## Uniform scale of the blank placeholder panel within its cell (aspect preserved).
 const PLACEHOLDER_SCALE := 0.85
 
+## Opacity for the flattened visual-layer items. Kept separate from Control
+## modulation so native controls outside the grid's visual layer are unaffected.
+var _visual_layer_opacity: float = 1.0
+var _visual_layer_opacity_target: float = 1.0
+var _visual_layer_opacity_tween: Tween = null
+
+func set_visual_layer_opacity(value: float) -> void:
+	var clamped := clampf(value, 0.0, 1.0)
+	var can_animate := is_inside_tree() and not Engine.is_editor_hint()
+	# The grid reasserts the same target on changed frames. Do not restart an
+	# in-flight fade; off-tree cards instead converge immediately for pooling.
+	if is_equal_approx(_visual_layer_opacity_target, clamped) \
+		and (can_animate or is_equal_approx(_visual_layer_opacity, clamped)):
+		return
+	_visual_layer_opacity_target = clamped
+	_kill_visual_layer_opacity_tween()
+	if not can_animate or is_equal_approx(_visual_layer_opacity, clamped):
+		_set_visual_layer_opacity_immediate(clamped)
+		return
+	_visual_layer_opacity_tween = create_tween()
+	_visual_layer_opacity_tween.set_trans(M3Motion.EASE_FADE_TRANS)
+	_visual_layer_opacity_tween.set_ease(M3Motion.EASE_FADE)
+	_visual_layer_opacity_tween.tween_method(
+		_set_visual_layer_opacity_immediate,
+		_visual_layer_opacity,
+		clamped,
+		M3Motion.STATE
+	)
+
+func _set_visual_layer_opacity_immediate(value: float) -> void:
+	_visual_layer_opacity = value
+	_apply_visual_layer_opacity()
+
+func _kill_visual_layer_opacity_tween() -> void:
+	if _visual_layer_opacity_tween and _visual_layer_opacity_tween.is_valid():
+		_visual_layer_opacity_tween.kill()
+	_visual_layer_opacity_tween = null
+
+func _apply_visual_layer_opacity() -> void:
+	var visual_modulate := Color(1.0, 1.0, 1.0, _visual_layer_opacity)
+	var media_modulate := visual_modulate
+	if _is_placeholder:
+		media_modulate.a *= PLACEHOLDER_MODULATE.a
+	if _media_canvas_item.is_valid():
+		RenderingServer.canvas_item_set_modulate(_media_canvas_item, media_modulate)
+	if _visual_bg_canvas_item.is_valid():
+		RenderingServer.canvas_item_set_modulate(_visual_bg_canvas_item, visual_modulate)
+	if _text_canvas_item.is_valid():
+		RenderingServer.canvas_item_set_modulate(_text_canvas_item, visual_modulate)
+	if _focus_ring_canvas_item.is_valid():
+		RenderingServer.canvas_item_set_modulate(_focus_ring_canvas_item, visual_modulate)
+
 func set_placeholder(value: bool) -> void:
 	if _is_placeholder == value:
 		return
 	_is_placeholder = value
+	if value:
+		_reset_text_scroll()
 	disabled = value
 	focus_mode = Control.FOCUS_NONE if value else Control.FOCUS_ALL
 	mouse_filter = Control.MOUSE_FILTER_IGNORE if value else Control.MOUSE_FILTER_STOP
 	# Placeholders render only the blank media panel; background and text items
-	# are hidden via _update_visual_items_visibility() and always stay white.
-	if _media_canvas_item.is_valid():
-		RenderingServer.canvas_item_set_modulate(_media_canvas_item, PLACEHOLDER_MODULATE if value else Color.WHITE)
-	if _visual_bg_canvas_item.is_valid():
-		RenderingServer.canvas_item_set_modulate(_visual_bg_canvas_item, Color.WHITE)
-	if _text_canvas_item.is_valid():
-		RenderingServer.canvas_item_set_modulate(_text_canvas_item, Color.WHITE)
+	# are hidden via _update_visual_items_visibility(). Preserve any page opacity
+	# while switching between normal and placeholder media modulation.
+	_apply_visual_layer_opacity()
 	if value and _focus_ring_canvas_item.is_valid():
 		# Placeholders are non-interactive; hide any focus overlays riding the carrier.
 		RenderingServer.canvas_item_set_visible(_focus_ring_canvas_item, false)
@@ -412,6 +529,10 @@ func _draw_placeholder_media() -> void:
 	var media_size := _media_bounds.size
 	if media_size.x <= 0.0 or media_size.y <= 0.0:
 		return
+	# Placeholder drawing can outlive the Control draw that last configured the
+	# cached stylebox (and backgroundless cards skip that draw entirely). Refresh
+	# it here so recycled placeholders never derive their color from an old theme.
+	_configure_stylebox_for_state()
 	var panel_size := media_size * PLACEHOLDER_SCALE
 	var panel_offset := (media_size - panel_size) / 2.0
 	if not _placeholder_style:
@@ -421,6 +542,9 @@ func _draw_placeholder_media() -> void:
 	var radius: float = card_rounding_ratio * minf(panel_size.x, panel_size.y) / 2.0
 	M3Theme.configure_smooth_corners(_placeholder_style, radius)
 	_placeholder_style.set_corner_radius_all(int(round(radius)))
+	# A recycled media item may still carry the cover shader; StyleBox drawing
+	# must use the placeholder color directly rather than sampling stale art.
+	RenderingServer.canvas_item_set_material(_media_canvas_item, RID())
 	RenderingServer.canvas_item_clear(_media_canvas_item)
 	_placeholder_style.draw(_media_canvas_item, Rect2(panel_offset, panel_size))
 
@@ -434,6 +558,7 @@ func set_visual_layer(layer: Control) -> void:
 	"""
 	if _visual_layer == layer:
 		return
+	_reset_text_scroll()
 	_visual_layer = layer
 	_visual_layer_rid = layer.get_canvas_item() if layer else RID()
 	set_notify_transform(layer != null)
@@ -446,6 +571,7 @@ func set_visual_layer(layer: Control) -> void:
 		_create_visual_layer_rs_items()
 	
 	_reparent_visual_items()
+	_apply_visual_layer_opacity()
 	if _visual_layer and _visual_layer.is_inside_tree() and is_inside_tree():
 		sync_visual_transform()
 		call_deferred("_mark_visuals_position_synced")
@@ -629,9 +755,13 @@ func _ready():
 	_ready_called = true
 
 func _exit_tree():
+	# Pooled/off-tree cards must not resume an old partial fade on re-entry.
+	_kill_visual_layer_opacity_tween()
+	_set_visual_layer_opacity_immediate(_visual_layer_opacity_target)
+	_reset_text_scroll()
+	text_focused = false
 	# Keep the flattened RS items allocated while the card is pooled. They are
 	# freed in NOTIFICATION_PREDELETE when the card is truly destroyed.
-	pass
 
 func _free_rs_items() -> void:
 	if _visual_bg_canvas_item.is_valid():
@@ -652,7 +782,7 @@ func _free_rs_items() -> void:
 
 func _update_visual_items_visibility() -> void:
 	var base_visible := visible and is_inside_tree()
-	var has_text := not headline.is_empty() or (not supporting_text.is_empty() and _get_content_size().y >= M3Units.dp(100.0))
+	var has_text := text_content_visible and (not headline.is_empty() or (supporting_text_visible and not supporting_text.is_empty() and _get_content_size().y >= M3Units.dp(100.0)))
 	var using_layer := _uses_visual_layer()
 	
 	# Background and text are only drawn through RS when a visual layer is active.
@@ -668,7 +798,7 @@ func _update_visual_items_visibility() -> void:
 			media_visible = media_visible and _visuals_position_synced
 		RenderingServer.canvas_item_set_visible(_media_canvas_item, media_visible)
 	if _text_canvas_item.is_valid():
-		var text_visible := base_visible and has_text and show_text_margin and using_layer and not _is_placeholder
+		var text_visible := base_visible and has_text and show_text_margin and _uses_rs_text() and not _is_placeholder
 		if using_layer:
 			text_visible = text_visible and _visuals_position_synced
 		RenderingServer.canvas_item_set_visible(_text_canvas_item, text_visible)
@@ -676,6 +806,16 @@ func _update_visual_items_visibility() -> void:
 		# Overlay carrier stays visible while the card is; focus effects gate
 		# themselves. Hidden only for placeholders (set_placeholder).
 		RenderingServer.canvas_item_set_visible(_focus_ring_canvas_item, base_visible and not _is_placeholder)
+
+func _ensure_text_canvas_item(parent_rid: RID = RID()) -> void:
+	if _text_canvas_item.is_valid():
+		return
+	var target_parent := parent_rid if parent_rid.is_valid() else _visual_layer_rid if _visual_layer_rid.is_valid() else get_canvas_item()
+	_text_canvas_item = RenderingServer.canvas_item_create()
+	RenderingServer.canvas_item_set_parent(_text_canvas_item, target_parent)
+	RenderingServer.canvas_item_set_draw_index(_text_canvas_item, 2)
+	RenderingServer.canvas_item_set_visible(_text_canvas_item, true)
+	RenderingServer.canvas_item_set_modulate(_text_canvas_item, Color(1.0, 1.0, 1.0, _visual_layer_opacity))
 
 func _create_visual_layer_rs_items(parent_rid: RID = RID()) -> void:
 	"""Create the RS items used only when a visual layer is active."""
@@ -685,11 +825,7 @@ func _create_visual_layer_rs_items(parent_rid: RID = RID()) -> void:
 		RenderingServer.canvas_item_set_parent(_visual_bg_canvas_item, target_parent)
 		RenderingServer.canvas_item_set_draw_index(_visual_bg_canvas_item, 0)
 		RenderingServer.canvas_item_set_visible(_visual_bg_canvas_item, true)
-	if not _text_canvas_item.is_valid():
-		_text_canvas_item = RenderingServer.canvas_item_create()
-		RenderingServer.canvas_item_set_parent(_text_canvas_item, target_parent)
-		RenderingServer.canvas_item_set_draw_index(_text_canvas_item, 2)
-		RenderingServer.canvas_item_set_visible(_text_canvas_item, true)
+	_ensure_text_canvas_item(target_parent)
 
 
 func _setup_rs_items() -> void:
@@ -718,6 +854,7 @@ func _setup_rs_items() -> void:
 	
 	_visuals_position_synced = false
 	_applied_text_bounds = Rect2()
+	_apply_visual_layer_opacity()
 
 
 func _enter_tree():
@@ -772,6 +909,7 @@ func _initialize_styleboxes():
 	_rounded_media_material.shader = RoundedMediaShader
 
 func _rebuild_layout():
+	_reset_text_scroll()
 	_applied_headline_size_dp = -1.0
 	_applied_supporting_size_dp = -1.0
 	_applied_font_color = Color(-1, -1, -1)
@@ -783,6 +921,12 @@ func _rebuild_layout():
 	_applied_text_bounds = Rect2()
 	_applied_show_background = true
 	_applied_fonts = {}
+	_applied_text_content_visible = not text_content_visible
+	_applied_supporting_text_visible = not supporting_text_visible
+	_applied_scroll_truncated_text = not scroll_truncated_text
+	_applied_text_focused = not text_focused
+	_applied_headline_scroll_offset = 0.0
+	_applied_supporting_scroll_offset = 0.0
 	_last_media_min_x = -1.0
 	_last_media_min_y = -1.0
 	_last_media_pos_x = -1.0
@@ -976,6 +1120,7 @@ func _ensure_bg_canvas_item() -> void:
 	RenderingServer.canvas_item_set_parent(_visual_bg_canvas_item, target_parent)
 	RenderingServer.canvas_item_set_draw_index(_visual_bg_canvas_item, 0)
 	RenderingServer.canvas_item_set_visible(_visual_bg_canvas_item, true)
+	RenderingServer.canvas_item_set_modulate(_visual_bg_canvas_item, Color(1.0, 1.0, 1.0, _visual_layer_opacity))
 
 func _apply_frosted_material() -> void:
 	var want := M3Theme.frosted_look and show_background
@@ -1075,43 +1220,160 @@ static func get_min_text_height_dp(card_height_dp: float, has_headline: bool = t
 	return HALF_PAD + supporting_h + PAD
 
 func _get_horizontal_alignment() -> HorizontalAlignment:
-	match content_alignment:
-		ContentAlignment.START:
+	if text_centered_overlay and text_alignment == TextAlignment.FOLLOW_CONTENT:
+		return HORIZONTAL_ALIGNMENT_CENTER
+	match text_alignment:
+		TextAlignment.LEFT:
 			return HORIZONTAL_ALIGNMENT_LEFT
-		ContentAlignment.CENTER:
+		TextAlignment.CENTER:
 			return HORIZONTAL_ALIGNMENT_CENTER
-		ContentAlignment.END:
+		TextAlignment.RIGHT:
 			return HORIZONTAL_ALIGNMENT_RIGHT
+		TextAlignment.FOLLOW_CONTENT:
+			match content_alignment:
+				ContentAlignment.START:
+					return HORIZONTAL_ALIGNMENT_LEFT
+				ContentAlignment.CENTER:
+					return HORIZONTAL_ALIGNMENT_CENTER
+				ContentAlignment.END:
+					return HORIZONTAL_ALIGNMENT_RIGHT
 	return HORIZONTAL_ALIGNMENT_LEFT
 
 
 func _uses_visual_layer() -> bool:
 	return _visual_layer_rid.is_valid()
 
+## Focused non-grid cards borrow the raw text renderer only while marquee mode
+## is active. Their normal Label path remains unchanged at every other time.
+func _uses_transient_rs_text() -> bool:
+	return not _uses_visual_layer() and scroll_truncated_text and text_focused \
+		and show_text_margin and text_content_visible
+
+func _uses_rs_text() -> bool:
+	return _uses_visual_layer() or _uses_transient_rs_text()
+
+func _reset_text_scroll() -> void:
+	if _headline_scroll_tween and _headline_scroll_tween.is_valid():
+		_headline_scroll_tween.kill()
+	if _supporting_scroll_tween and _supporting_scroll_tween.is_valid():
+		_supporting_scroll_tween.kill()
+	_headline_scroll_tween = null
+	_supporting_scroll_tween = null
+	_headline_scroll_distance = 0.0
+	_supporting_scroll_distance = 0.0
+	_headline_scroll_cycle = 0.0
+	_supporting_scroll_cycle = 0.0
+	_headline_scroll_offset = 0.0
+	_supporting_scroll_offset = 0.0
+
+## Returns (overflow, wrap cycle). The cycle includes the full untrimmed text
+## and the gap before its duplicate, so one complete pass wraps seamlessly.
+func _get_text_scroll_metrics(text: String, font: Font, font_size: int, available_width: float, has_text: bool) -> Vector2:
+	if not has_text or not scroll_truncated_text or not text_focused or not show_text_margin:
+		return Vector2.ZERO
+	if available_width <= 0.0:
+		return Vector2.ZERO
+	var text_width := font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
+	if text_width <= available_width + 0.5:
+		return Vector2.ZERO
+	return Vector2(text_width - available_width, text_width + M3Units.dp(TEXT_SCROLL_GAP_DP))
+
+func _sync_text_scroll(headline_metrics: Vector2, supporting_metrics: Vector2) -> void:
+	if headline_metrics.is_equal_approx(Vector2(_headline_scroll_distance, _headline_scroll_cycle)) \
+			and supporting_metrics.is_equal_approx(Vector2(_supporting_scroll_distance, _supporting_scroll_cycle)):
+		return
+	_reset_text_scroll()
+	_headline_scroll_distance = headline_metrics.x
+	_headline_scroll_cycle = headline_metrics.y
+	_supporting_scroll_distance = supporting_metrics.x
+	_supporting_scroll_cycle = supporting_metrics.y
+	if not is_inside_tree() or Engine.is_editor_hint():
+		return
+	if _headline_scroll_cycle > 0.0:
+		_headline_scroll_tween = _create_text_scroll_tween(true, _headline_scroll_cycle)
+	if _supporting_scroll_cycle > 0.0:
+		_supporting_scroll_tween = _create_text_scroll_tween(false, _supporting_scroll_cycle)
+
+func _create_text_scroll_tween(is_headline: bool, cycle_width: float) -> Tween:
+	var setter: Callable = _set_headline_scroll_offset if is_headline else _set_supporting_scroll_offset
+	var duration := maxf(0.1, cycle_width / maxf(1.0, M3Units.dp(TEXT_SCROLL_SPEED_DP)))
+	var tween := create_tween()
+	tween.set_loops()
+	tween.set_trans(Tween.TRANS_LINEAR)
+	# At -cycle_width the duplicate occupies the original starting position,
+	# making the jump back to zero invisible. No reverse ping-pong phase.
+	tween.tween_interval(TEXT_SCROLL_HOLD_SECONDS)
+	tween.tween_method(setter, 0.0, -cycle_width, duration)
+	return tween
+
+func _set_headline_scroll_offset(value: float) -> void:
+	if is_equal_approx(_headline_scroll_offset, value):
+		return
+	_headline_scroll_offset = value
+	if _ready_called and is_inside_tree():
+		_update_text()
+
+func _set_supporting_scroll_offset(value: float) -> void:
+	if is_equal_approx(_supporting_scroll_offset, value):
+		return
+	_supporting_scroll_offset = value
+	if _ready_called and is_inside_tree():
+		_update_text()
+
 func _update_text() -> void:
-	if not _uses_visual_layer():
+	if not _uses_rs_text():
+		_reset_text_scroll()
+		if _text_canvas_item.is_valid():
+			RenderingServer.canvas_item_set_visible(_text_canvas_item, false)
+			RenderingServer.canvas_item_set_clip(_text_canvas_item, false)
+			RenderingServer.canvas_item_set_custom_rect(_text_canvas_item, false)
 		_update_text_labels()
 		return
+
+	_ensure_text_canvas_item()
 	if not _text_canvas_item.is_valid():
 		return
+	# A transient raw renderer replaces, rather than overlays, ordinary Labels.
+	if _headline_label:
+		_headline_label.visible = false
+	if _supporting_label:
+		_supporting_label.visible = false
 	_update_visual_items_visibility()
 	if _cached_fonts.is_empty():
 		_cached_fonts = M3Theme.load_fonts()
 	var fonts = _cached_fonts
-	
+
 	var height_dp := _get_content_size().y / M3Units.get_scale()
 	var headline_spec := _pick_headline_spec(height_dp)
 	var supporting_spec := _pick_supporting_spec(height_dp)
+	var headline_font: Font = fonts[headline_spec.weight]
+	var supporting_font: Font = fonts[supporting_spec.weight]
+	var headline_size := int(M3Units.dp(headline_spec.size))
+	var supporting_size := int(M3Units.dp(supporting_spec.size))
 	var font_color := M3Theme.get_on_surface()
 	var supporting_color := M3Theme.get_on_surface_variant()
 	var h_align: int = _get_horizontal_alignment()
-	if text_centered_overlay:
-		h_align = HORIZONTAL_ALIGNMENT_CENTER
 	var needs_shadow := not show_background
-	var has_headline := not headline.is_empty()
-	var has_supporting := not supporting_text.is_empty() and _get_content_size().y >= M3Units.dp(100.0)
+	var has_headline := text_content_visible and not headline.is_empty()
+	var has_supporting := text_content_visible and supporting_text_visible \
+		and not supporting_text.is_empty() and _get_content_size().y >= M3Units.dp(100.0)
 	var text_rect := _text_bounds
-	
+	var pad := M3Units.dp(PADDING)
+	var half_pad := M3Units.dp(PADDING / 2.0)
+	var inner_x := text_rect.position.x + pad
+	var inner_y := text_rect.position.y + half_pad
+	var inner_w := text_rect.size.x - pad * 2.0
+	var inner_h := text_rect.size.y - half_pad * 2.0
+
+	# Overflow is measured from the untrimmed source string, independently for
+	# each visible line. _sync_text_scroll resets offsets before the cache check
+	# whenever zoom, fonts, content, or focus change the required distances.
+	var headline_metrics := _get_text_scroll_metrics(headline, headline_font, headline_size, inner_w, has_headline)
+	var supporting_metrics := _get_text_scroll_metrics(supporting_text, supporting_font, supporting_size, inner_w, has_supporting)
+	_sync_text_scroll(headline_metrics, supporting_metrics)
+	var scroll_headline := _headline_scroll_cycle > 0.0
+	var scroll_supporting := _supporting_scroll_cycle > 0.0
+
 	var text_changed: bool = (
 		headline != _applied_headline_text
 		or supporting_text != _applied_supporting_text
@@ -1123,12 +1385,18 @@ func _update_text() -> void:
 		or needs_shadow != _applied_text_shadow_enabled
 		or show_background != _applied_show_background
 		or text_centered_overlay != _applied_text_centered_overlay
+		or text_content_visible != _applied_text_content_visible
+		or supporting_text_visible != _applied_supporting_text_visible
+		or scroll_truncated_text != _applied_scroll_truncated_text
+		or text_focused != _applied_text_focused
+		or not is_equal_approx(_headline_scroll_offset, _applied_headline_scroll_offset)
+		or not is_equal_approx(_supporting_scroll_offset, _applied_supporting_scroll_offset)
 		or not text_rect.is_equal_approx(_applied_text_bounds)
 		or fonts != _applied_fonts
 	)
 	if not text_changed:
 		return
-	
+
 	_applied_headline_text = headline
 	_applied_supporting_text = supporting_text
 	_applied_headline_size_dp = headline_spec.size
@@ -1139,25 +1407,33 @@ func _update_text() -> void:
 	_applied_text_shadow_enabled = needs_shadow
 	_applied_show_background = show_background
 	_applied_text_centered_overlay = text_centered_overlay
+	_applied_text_content_visible = text_content_visible
+	_applied_supporting_text_visible = supporting_text_visible
+	_applied_scroll_truncated_text = scroll_truncated_text
+	_applied_text_focused = text_focused
+	_applied_headline_scroll_offset = _headline_scroll_offset
+	_applied_supporting_scroll_offset = _supporting_scroll_offset
 	_applied_text_bounds = text_rect
 	_applied_fonts = fonts
-	
+
 	RenderingServer.canvas_item_clear(_text_canvas_item)
-	
+	RenderingServer.canvas_item_set_clip(_text_canvas_item, false)
+	RenderingServer.canvas_item_set_custom_rect(_text_canvas_item, false)
+
 	if not has_headline and not has_supporting:
 		return
 	if text_rect.size.x <= 0.0 or text_rect.size.y <= 0.0:
 		return
-	
-	var pad := M3Units.dp(PADDING)
-	var half_pad := M3Units.dp(PADDING / 2.0)
-	var inner_x := text_rect.position.x + pad
-	var inner_y := text_rect.position.y + half_pad
-	var inner_w := text_rect.size.x - pad * 2.0
-	var inner_h := text_rect.size.y - half_pad * 2.0
 	if inner_w <= 0.0 or inner_h <= 0.0:
 		return
-	
+
+	if scroll_headline or scroll_supporting:
+		# Raw canvas items live on an unclipped visual layer, so marquee text
+		# needs an explicit local clip rect. Keep vertical bounds unchanged.
+		var clip_rect := Rect2(inner_x, text_rect.position.y, inner_w, text_rect.size.y)
+		RenderingServer.canvas_item_set_custom_rect(_text_canvas_item, true, clip_rect)
+		RenderingServer.canvas_item_set_clip(_text_canvas_item, true)
+
 	var label_gap := M3Units.dp(LABEL_GAP)
 	var shadow_offset := Vector2(M3Units.dp(1.5), M3Units.dp(2.5))
 	var shadow_color := Color(0.0, 0.0, 0.0, 0.5)
@@ -1169,57 +1445,81 @@ func _update_text() -> void:
 	if text_centered_overlay:
 		var block_h := 0.0
 		if has_headline:
-			block_h += fonts[headline_spec.weight].get_height(int(M3Units.dp(headline_spec.size)))
+			block_h += headline_font.get_height(headline_size)
 		if has_supporting:
 			if has_headline:
 				block_h += label_gap
-			block_h += fonts[supporting_spec.weight].get_height(int(M3Units.dp(supporting_spec.size)))
+			block_h += supporting_font.get_height(supporting_size)
 		block_start_y = inner_y + maxf(0.0, (inner_h - block_h) * 0.5)
+	elif has_headline and not has_supporting:
+		# With the platform line hidden, center the remaining title in the
+		# existing text reservation rather than leaving it aligned to the top.
+		block_start_y = inner_y + maxf(0.0, (inner_h - headline_font.get_height(headline_size)) * 0.5)
+	elif has_supporting and not has_headline:
+		block_start_y = inner_y + maxf(0.0, (inner_h - supporting_font.get_height(supporting_size)) * 0.5)
 
 	if has_headline:
-		var headline_font: Font = fonts[headline_spec.weight]
-		var headline_size := int(M3Units.dp(headline_spec.size))
 		var headline_y := block_start_y
+		var headline_origin := Vector2(inner_x + _headline_scroll_offset, headline_y)
+		var line_align := HORIZONTAL_ALIGNMENT_LEFT if scroll_headline else h_align
 		if use_text_line:
 			if _headline_text_line == null:
 				_headline_text_line = TextLine.new()
 			else:
 				_headline_text_line.clear()
 			_headline_text_line.add_string(headline, headline_font, headline_size)
-			_headline_text_line.set_width(inner_w)
-			_headline_text_line.set_horizontal_alignment(h_align)
-			_headline_text_line.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+			_headline_text_line.set_width(-1.0 if scroll_headline else inner_w)
+			_headline_text_line.set_horizontal_alignment(line_align)
+			_headline_text_line.text_overrun_behavior = TextServer.OVERRUN_NO_TRIMMING if scroll_headline else TextServer.OVERRUN_TRIM_ELLIPSIS
 			if needs_shadow:
-				_headline_text_line.draw(_text_canvas_item, Vector2(inner_x, headline_y) + shadow_offset, shadow_color)
-			_headline_text_line.draw(_text_canvas_item, Vector2(inner_x, headline_y), font_color)
+				_headline_text_line.draw(_text_canvas_item, headline_origin + shadow_offset, shadow_color)
+			_headline_text_line.draw(_text_canvas_item, headline_origin, font_color)
+			if scroll_headline:
+				var duplicate_origin := headline_origin + Vector2(_headline_scroll_cycle, 0.0)
+				if needs_shadow:
+					_headline_text_line.draw(_text_canvas_item, duplicate_origin + shadow_offset, shadow_color)
+				_headline_text_line.draw(_text_canvas_item, duplicate_origin, font_color)
 			headline_h = _headline_text_line.get_size().y
 		else:
 			var baseline: float = headline_y + headline_font.get_ascent(headline_size)
+			var fallback_origin := Vector2(inner_x + _headline_scroll_offset, baseline)
+			var line_width := -1.0 if scroll_headline else inner_w
 			if needs_shadow:
-				headline_font.draw_string(_text_canvas_item, Vector2(inner_x, baseline) + shadow_offset, headline, HORIZONTAL_ALIGNMENT_LEFT, -1, headline_size, shadow_color)
-			headline_font.draw_string(_text_canvas_item, Vector2(inner_x, baseline), headline, h_align, inner_w, headline_size, font_color)
+				headline_font.draw_string(_text_canvas_item, fallback_origin + shadow_offset, headline, line_align, line_width, headline_size, shadow_color)
+			headline_font.draw_string(_text_canvas_item, fallback_origin, headline, line_align, line_width, headline_size, font_color)
+			if scroll_headline:
+				var duplicate_origin := fallback_origin + Vector2(_headline_scroll_cycle, 0.0)
+				if needs_shadow:
+					headline_font.draw_string(_text_canvas_item, duplicate_origin + shadow_offset, headline, line_align, line_width, headline_size, shadow_color)
+				headline_font.draw_string(_text_canvas_item, duplicate_origin, headline, line_align, line_width, headline_size, font_color)
 			headline_h = headline_font.get_height(headline_size)
-	
+
 	if has_supporting:
-		var supporting_font: Font = fonts[supporting_spec.weight]
-		var supporting_size := int(M3Units.dp(supporting_spec.size))
 		var gap := label_gap if has_headline else 0.0
 		var supporting_y := block_start_y + headline_h + gap
 		if supporting_y + supporting_size > inner_y + inner_h:
 			return
+		var supporting_origin := Vector2(inner_x + _supporting_scroll_offset, supporting_y)
+		var line_align := HORIZONTAL_ALIGNMENT_LEFT if scroll_supporting else h_align
 		if use_text_line:
 			if _supporting_text_line == null:
 				_supporting_text_line = TextLine.new()
 			else:
 				_supporting_text_line.clear()
 			_supporting_text_line.add_string(supporting_text, supporting_font, supporting_size)
-			_supporting_text_line.set_width(inner_w)
-			_supporting_text_line.set_horizontal_alignment(h_align)
-			_supporting_text_line.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-			_supporting_text_line.draw(_text_canvas_item, Vector2(inner_x, supporting_y), supporting_color)
+			_supporting_text_line.set_width(-1.0 if scroll_supporting else inner_w)
+			_supporting_text_line.set_horizontal_alignment(line_align)
+			_supporting_text_line.text_overrun_behavior = TextServer.OVERRUN_NO_TRIMMING if scroll_supporting else TextServer.OVERRUN_TRIM_ELLIPSIS
+			_supporting_text_line.draw(_text_canvas_item, supporting_origin, supporting_color)
+			if scroll_supporting:
+				_supporting_text_line.draw(_text_canvas_item, supporting_origin + Vector2(_supporting_scroll_cycle, 0.0), supporting_color)
 		else:
 			var baseline: float = supporting_y + supporting_font.get_ascent(supporting_size)
-			supporting_font.draw_string(_text_canvas_item, Vector2(inner_x, baseline), supporting_text, h_align, inner_w, supporting_size, supporting_color)
+			var fallback_origin := Vector2(inner_x + _supporting_scroll_offset, baseline)
+			var line_width := -1.0 if scroll_supporting else inner_w
+			supporting_font.draw_string(_text_canvas_item, fallback_origin, supporting_text, line_align, line_width, supporting_size, supporting_color)
+			if scroll_supporting:
+				supporting_font.draw_string(_text_canvas_item, fallback_origin + Vector2(_supporting_scroll_cycle, 0.0), supporting_text, line_align, line_width, supporting_size, supporting_color)
 
 
 func _update_text_labels() -> void:
@@ -1239,7 +1539,7 @@ func _update_text_labels() -> void:
 	var needs_shadow := not show_background
 	
 	_headline_label.text = headline
-	_headline_label.visible = not headline.is_empty()
+	_headline_label.visible = text_content_visible and not headline.is_empty()
 	if _headline_label.visible:
 		_headline_label.add_theme_font_override("font", fonts[headline_spec.weight])
 		_headline_label.add_theme_font_size_override("font_size", M3Units.dp(headline_spec.size))
@@ -1257,7 +1557,8 @@ func _update_text_labels() -> void:
 			_headline_label.remove_theme_constant_override("shadow_outline_size")
 	
 	_supporting_label.text = supporting_text
-	_supporting_label.visible = not supporting_text.is_empty() and _get_content_size().y >= M3Units.dp(100.0)
+	_supporting_label.visible = text_content_visible and supporting_text_visible \
+		and not supporting_text.is_empty() and _get_content_size().y >= M3Units.dp(100.0)
 	if _supporting_label.visible:
 		_supporting_label.add_theme_font_override("font", fonts[supporting_spec.weight])
 		_supporting_label.add_theme_font_size_override("font_size", M3Units.dp(supporting_spec.size))
@@ -1267,6 +1568,10 @@ func _update_text_labels() -> void:
 		_supporting_label.remove_theme_constant_override("shadow_offset_x")
 		_supporting_label.remove_theme_constant_override("shadow_offset_y")
 		_supporting_label.remove_theme_constant_override("shadow_outline_size")
+
+	if _text_content:
+		var visible_lines := int(_headline_label.visible) + int(_supporting_label.visible)
+		_text_content.alignment = BoxContainer.ALIGNMENT_CENTER if visible_lines == 1 else BoxContainer.ALIGNMENT_BEGIN
 
 func _update_appearance():
 	if enforce_min_height:
@@ -1327,6 +1632,9 @@ func set_media_content(content: Control):
 func refresh_theme():
 	_cached_fonts = M3Theme.load_fonts()
 	_update_text()
+	if _is_placeholder:
+		# Raw RenderingServer canvas items do not repaint with queue_redraw().
+		_update_media()
 	queue_redraw()
 
 func refresh_scale() -> void:
@@ -1397,6 +1705,7 @@ func _notification(what: int):
 		NOTIFICATION_VISIBILITY_CHANGED:
 			_update_visual_items_visibility()
 		NOTIFICATION_PREDELETE:
+			_reset_text_scroll()
 			_free_rs_items()
 		NOTIFICATION_TRANSFORM_CHANGED:
 			# Re-stamp the visual position so RS items track the Control, but do
@@ -1637,5 +1946,6 @@ func _update_text_content_sizes() -> void:
 			_text_content.custom_minimum_size.y = min_text_h
 
 func _on_focus_changed():
+	text_focused = has_focus()
 	_apply_visual_draw_index()
 	queue_redraw()
